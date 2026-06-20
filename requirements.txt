@@ -1,0 +1,17 @@
+streamlit
+fastapi
+uvicorn
+Pillow
+opencv-python-headless
+numpy
+pandas
+ImageHash
+invisible-watermark
+piexif
+exifread
+transformers
+torch
+torchvision
+timm
+scikit-learn
+python-multipart
