@@ -6,7 +6,7 @@ from detectors.metadata import analyze_metadata
 from detectors.watermark import detect_watermark
 from detectors.hashing import generate_hashes
 from detectors.ai_model import get_ai_detector
-from forensics.ela import error_level_analysis
+from forensics.ela import combined_forensic_analysis
 from core.scoring import calculate_final_assessment
 from registry.db import RegistryDB
 
@@ -18,17 +18,17 @@ detector = get_ai_detector()
 async def scan_image(file: UploadFile = File(...)):
     contents = await file.read()
     file_obj = io.BytesIO(contents)
-    
-    metadata_res = analyze_metadata(file_obj)
-    watermark_res = detect_watermark(file_obj)
-    hash_res = generate_hashes(file_obj)
-    ai_res = detector.predict(file_obj)
-    ela_res = error_level_analysis(file_obj)
-    
+
+    metadata_res = analyze_metadata(io.BytesIO(contents))
+    watermark_res = detect_watermark(io.BytesIO(contents))
+    hash_res = generate_hashes(io.BytesIO(contents))
+    ai_res = detector.predict(io.BytesIO(contents))
+    forensic_res = combined_forensic_analysis(io.BytesIO(contents))
+
     final_score, label, conf = calculate_final_assessment(
-        metadata_res, watermark_res, ai_res, ela_res
+        metadata_res, watermark_res, ai_res, forensic_res
     )
-    
+
     record_id = db.add_record(
         filename=file.filename,
         phash=hash_res.get("phash"),
@@ -40,7 +40,7 @@ async def scan_image(file: UploadFile = File(...)):
         human_score=ai_res.get("human_probability", 0),
         final_assessment=label
     )
-    
+
     return {
         "record_id": record_id,
         "assessment": label,
@@ -51,7 +51,7 @@ async def scan_image(file: UploadFile = File(...)):
             "watermark": watermark_res,
             "hashing": hash_res,
             "ai_model": ai_res,
-            "forensics": ela_res
+            "forensics": forensic_res
         }
     }
 
