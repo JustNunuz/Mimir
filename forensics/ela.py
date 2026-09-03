@@ -15,7 +15,9 @@ def error_level_analysis(image_file, quality=90):
     """
     try:
         image_file.seek(0)
-        original = Image.open(image_file).convert('RGB')
+        original = Image.open(image_file)
+        is_jpeg = original.format in ('JPEG', 'MPO')
+        original = original.convert('RGB')
 
         # Save at given quality
         temp_buffer = io.BytesIO()
@@ -56,7 +58,8 @@ def error_level_analysis(image_file, quality=90):
             "variance": float(variance),
             "anomaly_score": float(anomaly_score),
             "ela_max_diff": float(max_diff),
-            "ela_image_base64": ela_base64
+            "ela_image_base64": ela_base64,
+            "ela_reliable": is_jpeg
         }
 
     except Exception as e:
@@ -81,6 +84,8 @@ def frequency_domain_analysis(image_file):
     try:
         image_file.seek(0)
         img = Image.open(image_file).convert('L')
+        # Resize to fixed resolution so spectral entropy bounds are consistent across all images
+        img = img.resize((512, 512), Image.Resampling.LANCZOS)
         img_array = np.array(img, dtype=np.float32)
 
         # 2D FFT → shift zero-frequency to centre
@@ -156,6 +161,11 @@ def combined_forensic_analysis(image_file, ela_quality=90):
 
     # Extract individual scores (defaulting to neutral on error)
     ela_score = ela_result.get("anomaly_score", 0.0) if "error" not in ela_result else 0.0
+    
+    # Down-weight ELA if the original image wasn't a JPEG (first-generation quantization loss)
+    if "error" not in ela_result and not ela_result.get("ela_reliable", True):
+        ela_score *= 0.2
+
     freq_score = freq_result.get("ai_frequency_score", 0.0) if "error" not in freq_result else 0.0
 
     # Composite: frequency analysis is the primary AI signal, ELA is supplementary

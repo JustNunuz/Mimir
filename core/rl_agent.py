@@ -30,7 +30,7 @@ class RLAgent:
 
     def __init__(self, db_path="mimir_registry.db"):
         self.db_path = db_path
-        self.features = ['metadata_evidence', 'watermark_evidence', 'ai_prob', 'ela_anomaly']
+        self.features = ['metadata_evidence', 'watermark_evidence', 'ai_prob', 'forensic_anomaly']
         self._init_db()
         self.weights, self.bias, self.learning_rate = self._load_state()
         self.feedback_buffer = []
@@ -80,7 +80,7 @@ class RLAgent:
                     'metadata_evidence': 1.5,
                     'watermark_evidence': 2.0,
                     'ai_prob': 1.0,
-                    'ela_anomaly': 0.1
+                    'forensic_anomaly': 0.1
                 }
                 cursor.execute(
                     "INSERT INTO rl_weights (id, weights_json, bias, learning_rate) VALUES (1, ?, ?, ?)",
@@ -101,6 +101,11 @@ class RLAgent:
             cursor.execute("SELECT weights_json, bias, learning_rate FROM rl_weights WHERE id=1")
             row = cursor.fetchone()
             weights = json.loads(row[0])
+            
+            # Migrate old db keys to new names
+            if 'ela_anomaly' in weights:
+                weights['forensic_anomaly'] = weights.pop('ela_anomaly')
+                
             bias = row[1]
             lr = row[2] if row[2] is not None else INITIAL_LEARNING_RATE
             return weights, bias, lr
@@ -156,7 +161,9 @@ class RLAgent:
     # --------------------------------------------------------- Features
     def extract_features(self, metadata_results, watermark_results, ai_results, forensic_results):
         meta = 1.0 if (metadata_results and metadata_results.get("evidence_score", 0) > 0.8) else 0.0
-        water = 1.0 if (watermark_results and watermark_results.get("watermark_found")) else 0.0
+        water = 0.0
+        if watermark_results:
+            water = watermark_results.get("soft_signal", 1.0 if watermark_results.get("watermark_found") else 0.0)
         ai = ai_results.get("ai_probability", 0.5) if (ai_results and "error" not in ai_results) else 0.5
         ela = forensic_results.get("anomaly_score", 0.0) if (forensic_results and "error" not in forensic_results) else 0.0
 
@@ -164,7 +171,7 @@ class RLAgent:
             'metadata_evidence': meta,
             'watermark_evidence': water,
             'ai_prob': ai,
-            'ela_anomaly': ela
+            'forensic_anomaly': ela
         }
 
     # --------------------------------------------------------- Predict
@@ -269,7 +276,7 @@ class RLAgent:
             'metadata_evidence': 1.5,
             'watermark_evidence': 2.0,
             'ai_prob': 1.0,
-            'ela_anomaly': 0.1
+            'forensic_anomaly': 0.1
         }
         self.bias = -0.5
         self.learning_rate = INITIAL_LEARNING_RATE

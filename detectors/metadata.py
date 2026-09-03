@@ -2,6 +2,17 @@ import exifread
 import piexif
 from PIL import Image
 
+STRUCTURED_TAGS = {"Image Software", "EXIF Software", "XMP-xmp:CreatorTool", "Software"}
+
+def _score_finding(finding, c2pa_verified=False):
+    if c2pa_verified or finding["source"] == "C2PA Manifest (signature verified)":
+        return 0.98
+    if finding["source"].startswith("EXIF") and finding.get("tag") in STRUCTURED_TAGS:
+        return 0.75
+    if finding["source"] == "Structured XMP":
+        return 0.75
+    return 0.30
+
 def analyze_metadata(image_file):
     """
     Extracts metadata and looks for signatures of AI generation tools.
@@ -18,8 +29,27 @@ def analyze_metadata(image_file):
     ai_keywords = [
         "openai", "dall-e", "midjourney", "stable diffusion", 
         "adobe firefly", "gemini", "flux", "content credentials", 
-        "c2pa", "trainedalgorithmicmedia"
+        "trainedalgorithmicmedia"
     ]
+    
+    c2pa_verified = False
+    try:
+        image_file.seek(0)
+        import c2pa
+        reader = c2pa.Reader(image_file)
+        manifest_data = reader.json()
+        if manifest_data:
+            c2pa_verified = True
+            findings.append({
+                "source": "C2PA Manifest (signature verified)",
+                "keyword_found": "c2pa",
+                "tag": "C2PA",
+                "raw_value": "Cryptographically verified C2PA manifest"
+            })
+    except ImportError:
+        pass
+    except Exception:
+        pass
     
     # 1. Standard EXIF Check
     for tag, value in tags.items():
@@ -32,35 +62,41 @@ def analyze_metadata(image_file):
                     findings.append({
                         "source": f"EXIF: {tag}",
                         "keyword_found": keyword,
+                        "tag": tag.split(" ")[-1] if " " in tag else tag,
                         "raw_value": str(value)
                     })
                     
-    # 2. Raw XMP / C2PA Search
+    # 2. Targeted XMP Search (instead of full file search)
     try:
         image_file.seek(0)
         raw_bytes = image_file.read()
-        raw_str = raw_bytes.decode('latin-1').lower()
-        
-        for keyword in ai_keywords:
-            if keyword in raw_str:
-                # Avoid duplicating findings from EXIF
-                if not any(f["keyword_found"] == keyword for f in findings):
-                    findings.append({
-                        "source": "Raw XMP/C2PA Data",
-                        "keyword_found": keyword,
-                        "raw_value": f"Binary substring match: {keyword}"
-                    })
+        xmp_start = raw_bytes.find(b'<?xpacket begin')
+        xmp_end = raw_bytes.find(b'<?xpacket end')
+        if xmp_start != -1 and xmp_end != -1:
+            xmp_data = raw_bytes[xmp_start:xmp_end].decode('utf-8', errors='ignore').lower()
+            for keyword in ai_keywords:
+                if keyword in xmp_data:
+                    if not any(f["keyword_found"] == keyword for f in findings):
+                        findings.append({
+                            "source": "Structured XMP",
+                            "keyword_found": keyword,
+                            "tag": "XMP",
+                            "raw_value": f"XMP match: {keyword}"
+                        })
     except Exception:
         pass
                     
-    # Determine confidence based on findings
+    # Determine confidence based on tiered findings
     evidence_score = 0.0
-    if len(findings) > 0:
-        evidence_score = 0.9 # High confidence if explicit AI keywords found in metadata
-        
+    for finding in findings:
+        score = _score_finding(finding, c2pa_verified)
+        if score > evidence_score:
+            evidence_score = score
+            
     return {
         "metadata_keys_count": len(metadata_dict),
         "findings": findings,
         "evidence_score": evidence_score,
-        "raw_metadata": metadata_dict
+        "raw_metadata": metadata_dict,
+        "c2pa_verified": c2pa_verified
     }

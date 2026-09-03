@@ -19,24 +19,38 @@ def detect_watermark(image_file):
         # Attempt recovery of hidden watermark
         decoder = WatermarkDecoder('bytes', 32)
         
-        watermark_payload = None
         confidence = 0.0
+        dwtdct_ok = False
+        dwtdctsvd_ok = False
+        payload_str_dct = None
+        payload_str_svd = None
         
         try:
-            watermark_payload = decoder.decode(img, 'dwtDct')
-            if watermark_payload:
-                try:
-                    payload_str = watermark_payload.decode('utf-8')
-                    if payload_str.isprintable():
-                        confidence = 0.8
-                except:
-                    pass
+            watermark_payload_dct = decoder.decode(img, 'dwtDct')
+            if watermark_payload_dct:
+                payload_str_dct = watermark_payload_dct.decode('utf-8')
+                if payload_str_dct.isprintable():
+                    dwtdct_ok = True
+                    confidence = 0.8
         except Exception:
             pass
             
+        try:
+            watermark_payload_svd = decoder.decode(img, 'dwtDctSvd')
+            if watermark_payload_svd:
+                payload_str_svd = watermark_payload_svd.decode('utf-8')
+                if payload_str_svd.isprintable():
+                    dwtdctsvd_ok = True
+                    confidence = max(confidence, 0.8)
+        except Exception:
+            pass
+            
+        cross_method_agreement = bool(dwtdct_ok and dwtdctsvd_ok)
+        
         return {
-            "watermark_found": watermark_payload is not None and confidence > 0,
-            "recovered_identifier": watermark_payload.decode('utf-8', errors='ignore') if watermark_payload else None,
+            "watermark_found": cross_method_agreement,
+            "soft_signal": confidence,
+            "recovered_identifier": payload_str_dct if payload_str_dct else payload_str_svd,
             "confidence": confidence
         }
     except Exception as e:

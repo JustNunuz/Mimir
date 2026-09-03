@@ -50,15 +50,31 @@ class RegistryDB:
             session.commit()
             return record.id
 
-    def find_by_hash(self, hash_type, hash_value):
+    def find_by_hash(self, hash_type, hash_value, max_distance=5):
+        import imagehash
         with self.Session() as session:
             # Safely getattr for the hash type column
             column = getattr(ImageRecord, hash_type, None)
             if column is None:
                 return []
             
-            records = session.query(ImageRecord).filter(column == hash_value).all()
-            return [self._record_to_dict(r) for r in records]
+            records = session.query(ImageRecord).all()
+            matches = []
+            try:
+                target_hash = imagehash.hex_to_hash(hash_value)
+            except Exception:
+                return []
+                
+            for r in records:
+                val = getattr(r, hash_type, None)
+                if val:
+                    try:
+                        h = imagehash.hex_to_hash(val)
+                        if target_hash - h <= max_distance:
+                            matches.append(self._record_to_dict(r))
+                    except Exception:
+                        pass
+            return matches
     
     def get_all_records(self):
         with self.Session() as session:
