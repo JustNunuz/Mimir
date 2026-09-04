@@ -58,6 +58,8 @@ class RegistryDB:
             if column is None:
                 return []
             
+            # TODO: O(n) Python loop scan won't scale beyond a few thousand rows.
+            # Move to a BK-tree or LSH-bucket index once the registry grows.
             records = session.query(ImageRecord).all()
             matches = []
             try:

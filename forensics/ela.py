@@ -118,8 +118,9 @@ def frequency_domain_analysis(image_file):
         spectral_entropy = float(-np.sum(mag_flat * np.log2(mag_flat)))
 
         # Normalise spectral entropy to 0–1 range (empirical bounds)
-        # Typical real photos: entropy ~18–22; AI images: ~14–18
-        entropy_norm = np.clip((spectral_entropy - 12.0) / 12.0, 0.0, 1.0)
+        # For 512x512, max theoretical entropy is log2(262144) = 18.0
+        # Adjusted bounds for 512x512: real photos ~15–17; AI images ~11–14
+        entropy_norm = np.clip((spectral_entropy - 10.0) / 7.0, 0.0, 1.0)
 
         # Composite AI frequency score (higher = more likely AI)
         # Low HF ratio + low entropy → suspicious

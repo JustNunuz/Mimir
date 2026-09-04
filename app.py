@@ -61,8 +61,10 @@ with tab1:
                     ahash=hash_res.get("ahash"),
                     watermark_id=watermark_res.get("recovered_identifier"),
                     metadata=metadata_res.get("findings"),
-                    ai_score=ai_res.get("ai_probability", 0),
-                    human_score=ai_res.get("human_probability", 0),
+                    # Store final_score (post-RL-blend, post-floor) not the raw ensemble output,
+                    # so the registry matches what the user actually saw in the UI.
+                    ai_score=final_score,
+                    human_score=1.0 - final_score,
                     final_assessment=label
                 )
 
@@ -107,7 +109,7 @@ with tab1:
                 st.info("No recognizable watermark detected.")
 
             st.subheader("Layer 3: Perceptual Hashes")
-            st.code(f"pHash: {hash_res.get('phash')}\\ndHash: {hash_res.get('dhash')}\\naHash: {hash_res.get('ahash')}")
+            st.code(f"pHash: {hash_res.get('phash')}\ndHash: {hash_res.get('dhash')}\naHash: {hash_res.get('ahash')}")
 
             st.subheader("Layer 4: AI Model Detection (Ensemble)")
             if "error" in ai_res:
@@ -158,31 +160,48 @@ with tab1:
             st.caption(f"Feedback buffer: {buf['buffered']}/{buf['needed']} samples "
                        f"({buf['remaining']} more needed before next weight update)")
 
+            # Soft reward targets scaled by label tier.
+            # Flat binary targets erase the tier information the scoring system expresses,
+            # and Inconclusive confirmations carry no meaningful ground-truth signal.
+            _SOFT_TARGET = {
+                "Verified Provenance Match (AI)":  0.95,
+                "Verified Watermark Match (AI)":   0.95,
+                "Likely AI Generated":             0.90,
+                "Possible AI Generated":           0.70,
+                "Inconclusive":                    None,   # excluded from training
+                "Possible Human Created":          0.30,
+                "Likely Human Created":            0.10,
+            }
+
             col_yes, col_no, col_skip = st.columns(3)
             with col_yes:
                 if st.button("✅ Yes — Correct", use_container_width=True):
                     if "last_features" in st.session_state:
-                        agent = get_rl_agent()
-                        is_ai = 1.0 if label in ["Likely AI Generated", "Possible AI Generated",
-                                                  "Verified Provenance Match (AI)",
-                                                  "Verified Watermark Match (AI)"] else 0.0
-                        updated = agent.update_reward(st.session_state["last_features"], is_ai)
-                        if updated:
-                            st.success("Batch threshold reached — weights updated! 🧠")
+                        target = _SOFT_TARGET.get(label)
+                        if target is None:
+                            st.info("Inconclusive results are excluded from training — no signal to learn from.")
                         else:
-                            st.info(f"Feedback recorded. {agent.get_buffer_status()['remaining']} more needed.")
+                            agent = get_rl_agent()
+                            updated = agent.update_reward(st.session_state["last_features"], target)
+                            if updated:
+                                st.success("Batch threshold reached — weights updated! 🧠")
+                            else:
+                                st.info(f"Feedback recorded. {agent.get_buffer_status()['remaining']} more needed.")
             with col_no:
                 if st.button("❌ No — Incorrect", use_container_width=True):
                     if "last_features" in st.session_state:
-                        agent = get_rl_agent()
-                        is_ai = 0.0 if label in ["Likely AI Generated", "Possible AI Generated",
-                                                  "Verified Provenance Match (AI)",
-                                                  "Verified Watermark Match (AI)"] else 1.0
-                        updated = agent.update_reward(st.session_state["last_features"], is_ai)
-                        if updated:
-                            st.warning("Batch threshold reached — weights adjusted! 🔄")
+                        correct_target = _SOFT_TARGET.get(label)
+                        if correct_target is None:
+                            st.info("Inconclusive results are excluded from training — no signal to learn from.")
                         else:
-                            st.info(f"Feedback recorded. {agent.get_buffer_status()['remaining']} more needed.")
+                            # Flip: if model said AI, user says human, and vice-versa
+                            flipped_target = 1.0 - correct_target
+                            agent = get_rl_agent()
+                            updated = agent.update_reward(st.session_state["last_features"], flipped_target)
+                            if updated:
+                                st.warning("Batch threshold reached — weights adjusted! 🔄")
+                            else:
+                                st.info(f"Feedback recorded. {agent.get_buffer_status()['remaining']} more needed.")
             with col_skip:
                 if st.button("⏭️ Skip", use_container_width=True):
                     st.info("Feedback skipped.")

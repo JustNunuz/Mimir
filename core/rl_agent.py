@@ -177,6 +177,10 @@ class RLAgent:
     # --------------------------------------------------------- Predict
     def predict(self, feature_dict):
         """Calculate logit: w1*x1 + w2*x2 ... + b → sigmoid → probability."""
+        print("DEBUG predict:")
+        print("self.features:", getattr(self, 'features', 'MISSING'))
+        print("self.weights:", getattr(self, 'weights', 'MISSING'))
+        print("feature_dict:", feature_dict)
         logit = self.bias
         for f in self.features:
             logit += self.weights[f] * feature_dict[f]
@@ -262,6 +266,11 @@ class RLAgent:
                 return False
 
             self.weights = json.loads(row[0])
+            
+            # Migrate old db keys to new names during rollback
+            if 'ela_anomaly' in self.weights:
+                self.weights['forensic_anomaly'] = self.weights.pop('ela_anomaly')
+                
             self.bias = row[1]
             self.learning_rate = row[2] if row[2] else INITIAL_LEARNING_RATE
             self._save_state()
