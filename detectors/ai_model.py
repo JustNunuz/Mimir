@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import concurrent.futures
 from transformers import AutoImageProcessor, AutoModelForImageClassification
 from PIL import Image
 import logging
@@ -97,11 +98,11 @@ class AIImageDetector:
 
     def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.models = []
 
-        for info in MODEL_REGISTRY:
-            det = _SingleModelDetector(info, self.device)
-            self.models.append(det)
+        # Load all models concurrently to cut startup time
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(MODEL_REGISTRY)) as pool:
+            futures = [pool.submit(_SingleModelDetector, info, self.device) for info in MODEL_REGISTRY]
+            self.models = [f.result() for f in futures]
 
         self.loaded_count = sum(1 for m in self.models if m.is_loaded)
         if self.loaded_count == 0:

@@ -33,14 +33,13 @@ class RLAgent:
         self.features = ['metadata_evidence', 'watermark_evidence', 'ai_prob', 'forensic_anomaly']
         self._init_db()
         self.weights, self.bias, self.learning_rate = self._load_state()
-        self.feedback_buffer = []
+        self.feedback_buffer = self._load_pending_buffer()
 
     # ------------------------------------------------------------------ DB
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
 
-            # Main weights table (single active row)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS rl_weights (
                     id INTEGER PRIMARY KEY,
@@ -50,7 +49,6 @@ class RLAgent:
                 )
             ''')
 
-            # Weight history for rollback
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS rl_weight_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,7 +60,6 @@ class RLAgent:
                 )
             ''')
 
-            # Feedback log for auditability
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS rl_feedback_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +70,16 @@ class RLAgent:
                 )
             ''')
 
-            # Insert default weights if empty
+            # Persistent feedback buffer — survives app restarts
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS rl_pending_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    features_json TEXT,
+                    target REAL,
+                    timestamp TEXT
+                )
+            ''')
+
             cursor.execute("SELECT COUNT(*) FROM rl_weights")
             if cursor.fetchone()[0] == 0:
                 default_weights = {
@@ -87,7 +93,6 @@ class RLAgent:
                     (json.dumps(default_weights), -0.5, INITIAL_LEARNING_RATE)
                 )
             else:
-                # Migrate: add learning_rate column if it doesn't exist
                 try:
                     cursor.execute("SELECT learning_rate FROM rl_weights LIMIT 1")
                 except sqlite3.OperationalError:
@@ -145,6 +150,43 @@ class RLAgent:
             )
             conn.commit()
 
+    def _load_pending_buffer(self):
+        """Load any unprocessed feedback that survived a previous restart."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT features_json, target FROM rl_pending_feedback ORDER BY id ASC")
+                rows = cursor.fetchall()
+                buffer = [(json.loads(r[0]), float(r[1])) for r in rows]
+                if buffer:
+                    logger.info("Restored %d pending feedback samples from DB.", len(buffer))
+                return buffer
+        except Exception as e:
+            logger.warning("Could not load pending buffer: %s", e)
+            return []
+
+    def _persist_to_pending(self, features, target):
+        """Write a buffered feedback sample to the DB so it survives restarts."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO rl_pending_feedback (features_json, target, timestamp) VALUES (?, ?, ?)",
+                    (json.dumps(features), target, datetime.now().isoformat())
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning("Failed to persist pending feedback: %s", e)
+
+    def _clear_pending_buffer(self):
+        """Remove all pending feedback entries after a batch update."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM rl_pending_feedback")
+                conn.commit()
+        except Exception as e:
+            logger.warning("Failed to clear pending buffer: %s", e)
+
     def _log_feedback(self, features, target, prediction):
         """Log each feedback event for auditability."""
         try:
@@ -177,10 +219,6 @@ class RLAgent:
     # --------------------------------------------------------- Predict
     def predict(self, feature_dict):
         """Calculate logit: w1*x1 + w2*x2 ... + b → sigmoid → probability."""
-        print("DEBUG predict:")
-        print("self.features:", getattr(self, 'features', 'MISSING'))
-        print("self.weights:", getattr(self, 'weights', 'MISSING'))
-        print("feature_dict:", feature_dict)
         logit = self.bias
         for f in self.features:
             logit += self.weights[f] * feature_dict[f]
@@ -194,21 +232,46 @@ class RLAgent:
         """
         Buffers feedback. When the buffer reaches MIN_FEEDBACK_SAMPLES,
         applies a batch gradient update with safety clamping.
-
-        is_ai_target: 1.0 if the image was AI, 0.0 if human.
+        Buffer is persisted to DB so it survives restarts.
         """
         prediction = self.predict(feature_dict)
         self._log_feedback(feature_dict, is_ai_target, prediction)
 
-        self.feedback_buffer.append((copy.deepcopy(feature_dict), float(is_ai_target)))
+        fd = copy.deepcopy(feature_dict)
+        target = float(is_ai_target)
+        self._persist_to_pending(fd, target)
+        self.feedback_buffer.append((fd, target))
 
         if len(self.feedback_buffer) >= MIN_FEEDBACK_SAMPLES:
             self._apply_batch_update()
-            return True  # Weights were updated
+            return True
         else:
             remaining = MIN_FEEDBACK_SAMPLES - len(self.feedback_buffer)
             logger.info("Feedback buffered. %d more needed before weight update.", remaining)
-            return False  # Buffered, not yet applied
+            return False
+
+    def update_reward_immediate(self, feature_dict, target):
+        """
+        Applies a single-sample gradient update immediately — no buffering.
+        Use this for explicit user corrections where ground-truth is certain.
+        Returns True always (weights always updated).
+        """
+        prediction = self.predict(feature_dict)
+        self._log_feedback(feature_dict, target, prediction)
+        self._save_snapshot(reason="immediate_correction")
+
+        error = float(target) - prediction
+        self.bias += self.learning_rate * error
+        for f in self.features:
+            self.weights[f] += self.learning_rate * error * feature_dict[f]
+
+        for f in self.features:
+            self.weights[f] = float(np.clip(self.weights[f], *WEIGHT_BOUNDS))
+        self.bias = float(np.clip(self.bias, *WEIGHT_BOUNDS))
+
+        self._save_state()
+        logger.info("Immediate correction applied. New weights: %s, bias: %.4f", self.weights, self.bias)
+        return True
 
     def _apply_batch_update(self):
         """Apply buffered feedback as a single batch gradient descent step."""
@@ -235,6 +298,7 @@ class RLAgent:
         self.learning_rate *= LR_DECAY
 
         self.feedback_buffer.clear()
+        self._clear_pending_buffer()
         self._save_state()
         logger.info("Batch update applied. New weights: %s, bias: %.4f, lr: %.6f",
                      self.weights, self.bias, self.learning_rate)

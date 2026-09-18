@@ -1,3 +1,4 @@
+import concurrent.futures
 import cv2
 import numpy as np
 from PIL import Image, ImageChops, ImageEnhance
@@ -157,8 +158,12 @@ def combined_forensic_analysis(image_file, ela_quality=90):
     image_file.seek(0)
     file_bytes = image_file.read()
 
-    ela_result = error_level_analysis(io.BytesIO(file_bytes), quality=ela_quality)
-    freq_result = frequency_domain_analysis(io.BytesIO(file_bytes))
+    # Run ELA and frequency analysis concurrently — they are fully independent
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        f_ela = pool.submit(error_level_analysis, io.BytesIO(file_bytes), ela_quality)
+        f_freq = pool.submit(frequency_domain_analysis, io.BytesIO(file_bytes))
+        ela_result = f_ela.result()
+        freq_result = f_freq.result()
 
     # Extract individual scores (defaulting to neutral on error)
     ela_score = ela_result.get("anomaly_score", 0.0) if "error" not in ela_result else 0.0
